@@ -16,7 +16,6 @@ RosterMan is a comprehensive Bash script designed to simplify the management of 
 - 🗑️ **Safe Host Removal**: Option to remove SSH keys from remote hosts when deleting entries
 - 📋 **Colorized List Output**: Beautiful formatted listing of all roster entries
 - ✨ **Validation**: Verifies SSH connectivity before adding hosts to roster
-- 🎯 **sudo Support**: Correctly handles running under sudo for known_hosts management
 
 ## Requirements
 
