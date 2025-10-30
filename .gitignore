@@ -1,0 +1,15 @@
+# VS Code workspace files
+*.code-workspace
+
+# Backup files
+*.backup
+
+# Temporary files
+*.tmp
+*~
+
+# SSH keys (if any accidentally placed here)
+*.pem
+*.key
+id_rsa*
+
