@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#roster manage script version 0.1a (c) synapse
+#roster manage script version 0.2a (c) synapse
 
 # Color codes
 GREEN='\033[0;32m'

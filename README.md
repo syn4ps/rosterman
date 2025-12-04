@@ -1,6 +1,6 @@
 # RosterMan - Salt-SSH Roster Management Script
 
-**Version:** 0.1a  
+**Version:** 0.2a  
 **Author:** synapse
 
 ## Overview
@@ -28,9 +28,9 @@ RosterMan is a comprehensive Bash script designed to simplify the management of 
 
 1. Download the script:
 ```bash
-wget https://your-repo/rosterman.sh
+wget https://raw.githubusercontent.com/syn4ps/rosterman/refs/heads/main/rosterman.sh
 # or
-curl -O https://your-repo/rosterman.sh
+curl -O https://raw.githubusercontent.com/syn4ps/rosterman/refs/heads/main/rosterman.sh
 ```
 
 2. Make it executable:
@@ -345,6 +345,11 @@ Contributions are welcome! Please:
 This script is provided as-is for use with SaltStack deployments.
 
 ## Changelog
+
+### Version 0.2a
+- Fixed password trailing newline bug in prompt_secret function
+- Added SSH port change functionality for security (non-standard ports)
+- Improved password handling in roster file
 
 ### Version 0.1a
 - Initial release
