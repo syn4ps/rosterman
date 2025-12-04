@@ -27,7 +27,6 @@ prompt_secret() {
     local prompt_text="$1"
     local input
     read -s -p "$prompt_text: " input
-    echo
     echo "$input"
 }
 
