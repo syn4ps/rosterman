@@ -1,6 +1,6 @@
 # RosterMan - Salt-SSH Roster Management Script
 
-**Version:** 0.2a  
+**Version:** 0.3a  
 **Author:** synapse
 
 ## Overview
