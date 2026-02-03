@@ -91,7 +91,7 @@ copy_public_key() {
             chmod 700 ~/.ssh &&
             echo \"$key_content\" >> ~/.ssh/authorized_keys &&
             chmod 600 ~/.ssh/authorized_keys
-        "
+        " 2>&1 | grep -v "warning: setlocale" || true
     
     return $?
 }
@@ -104,14 +104,72 @@ check_name_exists() {
 }
 
 # Function to verify SSH by allowing interactive password entry (no sshpass/expect)
+# Sets global variable port_change_success=1 if port change succeeded, 0 if failed or not attempted
 verify_ssh() {
     local host="$1"
     local port="$2"
     local username="$3"
+    local new_port="$4"  # Optional: new port to change to after verification
+    local original_port="$5"  # Optional: original port for port change
+    
+    # Initialize port change success flag
+    port_change_success=0
+
+    # Build command to execute remotely
+    local remote_cmd="true"
+    
+    # If port change is needed, combine verification and port change in one SSH session
+    if [ -n "$new_port" ] && [ -n "$original_port" ] && [ "$original_port" != "$new_port" ]; then
+        # Build port change script to execute in same SSH session
+        local port_change_script="
+SSHD_CONFIG=\"/etc/ssh/sshd_config\"
+NEW_PORT=\"$new_port\"
+
+# Backup original config
+if [ ! -f \"\${SSHD_CONFIG}.bak\" ]; then
+    cp \"\$SSHD_CONFIG\" \"\${SSHD_CONFIG}.bak\"
+fi
+
+# Check if Port directive exists
+if grep -qE \"^[[:space:]]*Port[[:space:]]+\" \"\$SSHD_CONFIG\"; then
+    # Replace existing Port directive
+    sed -i \"s/^[[:space:]]*Port[[:space:]]*.*/Port \$NEW_PORT/\" \"\$SSHD_CONFIG\"
+else
+    # Add Port directive after #Port 22 comment or at the beginning
+    if grep -qE \"^[[:space:]]*#Port[[:space:]]+22\" \"\$SSHD_CONFIG\"; then
+        sed -i \"/^[[:space:]]*#Port[[:space:]]*22/s/^[[:space:]]*#Port[[:space:]]*22/Port \$NEW_PORT\\n#Port 22/\" \"\$SSHD_CONFIG\"
+    else
+        # Add at the beginning of file
+        sed -i \"1i Port \$NEW_PORT\" \"\$SSHD_CONFIG\"
+    fi
+fi
+
+# Test SSH configuration
+if sshd -t 2>/dev/null; then
+    # Reload systemd to pick up config changes (for socket activation)
+    systemctl daemon-reload 2>/dev/null || true
+    if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service sshd restart 2>/dev/null || service ssh restart 2>/dev/null; then
+        echo \"SSH_PORT_CHANGED_SUCCESS\"
+        exit 0
+    else
+        echo \"SSH_PORT_CHANGE_FAILED_RESTART\"
+        exit 1
+    fi
+else
+    if [ -f \"\${SSHD_CONFIG}.bak\" ]; then
+        cp \"\${SSHD_CONFIG}.bak\" \"\$SSHD_CONFIG\"
+    fi
+    echo \"SSH_PORT_CHANGE_FAILED_CONFIG\"
+    exit 1
+fi
+"
+        remote_cmd="$port_change_script"
+    fi
 
     # Force password/keyboard-interactive auth and allow prompt
     # BatchMode=no allows password prompts; PubkeyAuthentication=no avoids key auth masking password failures
-    ssh \
+    # Suppress stdout but keep stderr for markers
+    local ssh_output=$(ssh \
         -tt \
         -o BatchMode=no \
         -o ConnectTimeout=10 \
@@ -120,19 +178,96 @@ verify_ssh() {
         -o PreferredAuthentications=password,keyboard-interactive \
         -o PubkeyAuthentication=no \
         -o LogLevel=ERROR \
-        -p "$port" "$username@$host" true
-    return $?
+        -p "$port" "$username@$host" "$remote_cmd" 2>&1 | grep -v "warning: setlocale")
+    
+    local ssh_result=$?
+    
+    if [ $ssh_result -eq 0 ]; then
+        # Check if port change was attempted and succeeded
+        if [ -n "$new_port" ] && [ -n "$original_port" ] && [ "$original_port" != "$new_port" ]; then
+            if echo "$ssh_output" | grep -q "SSH_PORT_CHANGED_SUCCESS"; then
+                echo -e "${GREEN}SSH port changed successfully. Waiting 3 seconds for SSH service to restart...${NC}"
+                sleep 3
+                port_change_success=1
+            elif echo "$ssh_output" | grep -q "SSH_PORT_CHANGE_FAILED"; then
+                echo -e "${YELLOW}Warning: Failed to change SSH port. Will use original port $original_port${NC}"
+                port_change_success=0
+            fi
+        fi
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Function to verify SSH with key authentication
+# Sets global variable port_change_success=1 if port change succeeded, 0 if failed or not attempted
 verify_ssh_with_key() {
     local host="$1"
     local port="$2"
     local username="$3"
     local private_key="$4"
+    local new_port="$5"  # Optional: new port to change to after verification
+    local original_port="$6"  # Optional: original port for port change
+    
+    # Initialize port change success flag
+    port_change_success=0
+
+    # Build command to execute remotely
+    local remote_cmd="true"
+    
+    # If port change is needed, combine verification and port change in one SSH session
+    if [ -n "$new_port" ] && [ -n "$original_port" ] && [ "$original_port" != "$new_port" ]; then
+        # Build port change script to execute in same SSH session
+        # Suppress stdout but keep stderr for markers
+        local port_change_script="
+exec >/dev/null
+SSHD_CONFIG=\"/etc/ssh/sshd_config\"
+NEW_PORT=\"$new_port\"
+
+# Backup original config
+if [ ! -f \"\${SSHD_CONFIG}.bak\" ]; then
+    cp \"\$SSHD_CONFIG\" \"\${SSHD_CONFIG}.bak\"
+fi
+
+# Check if Port directive exists
+if grep -qE \"^[[:space:]]*Port[[:space:]]+\" \"\$SSHD_CONFIG\"; then
+    # Replace existing Port directive
+    sed -i \"s/^[[:space:]]*Port[[:space:]]*.*/Port \$NEW_PORT/\" \"\$SSHD_CONFIG\"
+else
+    # Add Port directive after #Port 22 comment or at the beginning
+    if grep -qE \"^[[:space:]]*#Port[[:space:]]+22\" \"\$SSHD_CONFIG\"; then
+        sed -i \"/^[[:space:]]*#Port[[:space:]]*22/s/^[[:space:]]*#Port[[:space:]]*22/Port \$NEW_PORT\\n#Port 22/\" \"\$SSHD_CONFIG\"
+    else
+        # Add at the beginning of file
+        sed -i \"1i Port \$NEW_PORT\" \"\$SSHD_CONFIG\"
+    fi
+fi
+
+# Test SSH configuration
+if sshd -t 2>/dev/null; then
+    # Reload systemd to pick up config changes (for socket activation)
+    systemctl daemon-reload 2>/dev/null || true
+    if systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service sshd restart 2>/dev/null || service ssh restart 2>/dev/null; then
+        echo \"SSH_PORT_CHANGED_SUCCESS\" >&2
+        exit 0
+    else
+        echo \"SSH_PORT_CHANGE_FAILED_RESTART\" >&2
+        exit 1
+    fi
+else
+    if [ -f \"\${SSHD_CONFIG}.bak\" ]; then
+        cp \"\${SSHD_CONFIG}.bak\" \"\$SSHD_CONFIG\"
+    fi
+    echo \"SSH_PORT_CHANGE_FAILED_CONFIG\" >&2
+    exit 1
+fi
+"
+        remote_cmd="$port_change_script"
+    fi
 
     # Try SSH with key authentication
-    ssh \
+    local ssh_output=$(ssh \
         -i "$private_key" \
         -o BatchMode=yes \
         -o ConnectTimeout=10 \
@@ -141,8 +276,26 @@ verify_ssh_with_key() {
         -o PubkeyAuthentication=yes \
         -o PasswordAuthentication=no \
         -o LogLevel=ERROR \
-        -p "$port" "$username@$host" true 2>/dev/null
-    return $?
+        -p "$port" "$username@$host" "$remote_cmd" 2>&1 | grep -v "warning: setlocale")
+    
+    local ssh_result=$?
+    
+    if [ $ssh_result -eq 0 ]; then
+        # Check if port change was attempted and succeeded
+        if [ -n "$new_port" ] && [ -n "$original_port" ] && [ "$original_port" != "$new_port" ]; then
+            if echo "$ssh_output" | grep -q "SSH_PORT_CHANGED_SUCCESS"; then
+                echo -e "${GREEN}SSH port changed successfully. Waiting 3 seconds for SSH service to restart...${NC}"
+                sleep 3
+                port_change_success=1
+            elif echo "$ssh_output" | grep -q "SSH_PORT_CHANGE_FAILED"; then
+                echo -e "${YELLOW}Warning: Failed to change SSH port. Will use original port $original_port${NC}"
+                port_change_success=0
+            fi
+        fi
+        return 0
+    else
+        return 1
+    fi
 }
 
 # Function to add host to known_hosts file
@@ -187,7 +340,6 @@ add_to_known_hosts() {
     fi
     
     # Add host to known_hosts using ssh-keyscan
-    echo "Adding host fingerprint to known_hosts..."
     if [ "$port" = "22" ]; then
         ssh-keyscan -H "$host" >> "$known_hosts_file" 2>/dev/null
     else
@@ -195,6 +347,7 @@ add_to_known_hosts() {
     fi
     
     if [ $? -eq 0 ]; then
+        echo ""
         echo -e "${GREEN}Host fingerprint added to $known_hosts_file${NC}"
         return 0
     else
@@ -238,6 +391,116 @@ remove_from_known_hosts() {
     else
         echo -e "${YELLOW}Host fingerprint not found in known_hosts or already removed${NC}"
         return 0
+    fi
+}
+
+# Function to change SSH port on remote host
+change_ssh_port() {
+    local host="$1"
+    local old_port="$2"
+    local new_port="$3"
+    local username="$4"
+    local private_key="$5"
+    
+    if [ -z "$host" ] || [ -z "$old_port" ] || [ -z "$new_port" ] || [ -z "$username" ]; then
+        echo -e "${RED}Error: Host, ports, and username are required for SSH port change${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Changing SSH port from $old_port to $new_port on remote host...${NC}"
+    
+    # Build remote script (suppress all output except important messages)
+    local remote_script="
+exec >/dev/null 2>&1
+SSHD_CONFIG=\"/etc/ssh/sshd_config\"
+NEW_PORT=\"$new_port\"
+
+# Backup original config
+if [ ! -f \"\${SSHD_CONFIG}.bak\" ]; then
+    cp \"\$SSHD_CONFIG\" \"\${SSHD_CONFIG}.bak\"
+fi
+
+# Check if Port directive exists
+if grep -qE \"^[[:space:]]*Port[[:space:]]+\" \"\$SSHD_CONFIG\"; then
+    # Replace existing Port directive
+    sed -i \"s/^[[:space:]]*Port[[:space:]]*.*/Port \$NEW_PORT/\" \"\$SSHD_CONFIG\"
+else
+    # Add Port directive after #Port 22 comment or at the beginning
+    if grep -qE \"^[[:space:]]*#Port[[:space:]]+22\" \"\$SSHD_CONFIG\"; then
+        sed -i \"/^[[:space:]]*#Port[[:space:]]*22/s/^[[:space:]]*#Port[[:space:]]*22/Port \$NEW_PORT\\n#Port 22/\" \"\$SSHD_CONFIG\"
+    else
+        # Add at the beginning of file
+        sed -i \"1i Port \$NEW_PORT\" \"\$SSHD_CONFIG\"
+    fi
+fi
+
+# Test SSH configuration
+if sshd -t 2>/dev/null; then
+    echo \"SSH configuration is valid\" >&2
+    
+    # Reload systemd to pick up config changes (for socket activation)
+    systemctl daemon-reload 2>/dev/null || true
+    
+    # Restart SSH service
+    if systemctl restart sshd 2>/dev/null; then
+        echo \"SSH service restarted successfully\" >&2
+        exit 0
+    elif systemctl restart ssh 2>/dev/null; then
+        echo \"SSH service restarted successfully\" >&2
+        exit 0
+    elif service sshd restart 2>/dev/null; then
+        echo \"SSH service restarted successfully\" >&2
+        exit 0
+    elif service ssh restart 2>/dev/null; then
+        echo \"SSH service restarted successfully\" >&2
+        exit 0
+    else
+        echo \"Warning: Could not restart SSH service automatically. Please restart manually.\" >&2
+        exit 1
+    fi
+else
+    echo \"Error: SSH configuration test failed. Reverting changes...\" >&2
+    if [ -f \"\${SSHD_CONFIG}.bak\" ]; then
+        cp \"\${SSHD_CONFIG}.bak\" \"\$SSHD_CONFIG\"
+    fi
+    exit 1
+fi
+"
+    
+    # Execute remote script
+    if [ -n "$private_key" ] && [ -f "$private_key" ]; then
+        # Use key authentication
+        echo "$remote_script" | ssh \
+            -i "$private_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR \
+            -p "$old_port" "$username@$host" "bash" 2>&1 | grep -v "warning: setlocale"
+    else
+        # Use password authentication
+        # Use -T to suppress pseudo-terminal allocation and script echo
+        echo "$remote_script" | ssh \
+            -T \
+            -o BatchMode=no \
+            -o ConnectTimeout=10 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o PreferredAuthentications=password,keyboard-interactive \
+            -o PubkeyAuthentication=no \
+            -o LogLevel=ERROR \
+            -p "$old_port" "$username@$host" "bash" 2>&1 | grep -v "warning: setlocale"
+    fi
+    
+    local result=$?
+    
+    if [ $result -eq 0 ]; then
+        echo -e "${GREEN}SSH port successfully changed from $old_port to $new_port${NC}"
+        return 0
+    else
+        echo -e "${RED}Failed to change SSH port on remote host${NC}"
+        return 1
     fi
 }
 
@@ -371,7 +634,7 @@ remove_host() {
                     -o StrictHostKeyChecking=no \
                     -o UserKnownHostsFile=/dev/null \
                     -o LogLevel=ERROR \
-                    -p "$port" "$user@$host" << EOF
+                    -p "$port" "$user@$host" "bash" << EOF 2>&1 | grep -v "warning: setlocale" || true
 if [ -f ~/.ssh/authorized_keys ]; then
     grep -v 'salt-ssh-${name}' ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp
     mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys
@@ -622,6 +885,17 @@ description=$(prompt_with_default "Enter a description for the host" "")
 host=$(prompt_with_default "Enter the host (IP address or hostname)" "$name")
 port=$(prompt_with_default "Enter the SSH port" "22")
 
+# Check if port is 22 and ask if user wants to change it
+original_port="$port"
+change_port_choice="n"
+if [ "$port" = "22" ]; then
+    change_port_choice=$(prompt_with_default "Port 22 is not secure. Do you want to change it to a non-standard port? (y/n)" "y")
+    if [[ "$change_port_choice" =~ ^[Yy]$ ]]; then
+        port=$(prompt_with_default "Enter new SSH port" "51821")
+        echo -e "${YELLOW}SSH port will be changed from $original_port to $port after setup${NC}"
+    fi
+fi
+
 # Ask user about authentication method
 auth_choice=$(prompt_with_default "Do you want to enable key based auth y/n" "y")
 
@@ -640,14 +914,28 @@ if [[ "$auth_choice" =~ ^[Yy]$ ]]; then
         temp_private_key="$temp_keys_dir/${name}"
         temp_public_key="$temp_keys_dir/${name}.pub"
         
-        # Copy public key to remote host
-        if copy_public_key "$host" "$port" "$username" "$temp_public_key"; then
+        # Copy public key to remote host (use original_port for initial connection)
+        if copy_public_key "$host" "$original_port" "$username" "$temp_public_key"; then
             echo -e "${GREEN}Public key added to remote host successfully.${NC}"
             
-            # Test key authentication
-            if verify_ssh_with_key "$host" "$port" "$username" "$temp_private_key"; then
+            # Test key authentication (use original_port for initial connection)
+            # Pass new_port and original_port if port change is needed
+            verify_new_port=""
+            if [ "$original_port" = "22" ] && [ "$port" != "22" ] && [[ "$change_port_choice" =~ ^[Yy]$ ]]; then
+                verify_new_port="$port"
+            fi
+            
+            if verify_ssh_with_key "$host" "$original_port" "$username" "$temp_private_key" "$verify_new_port" "$original_port"; then
                 echo -e "${GREEN}Key authentication verified successfully.${NC}"
                 auth_method="key"
+                # Port change is handled inside verify_ssh_with_key function
+                # Update port based on whether change was successful
+                if [ -n "$verify_new_port" ] && [ "$port_change_success" = "1" ]; then
+                    port="$verify_new_port"
+                elif [ -n "$verify_new_port" ]; then
+                    # Port change was attempted but failed, use original port
+                    port="$original_port"
+                fi
             else
                 echo -e "${RED}Key authentication failed. Falling back to password authentication.${NC}"
                 auth_method="password"
@@ -668,11 +956,25 @@ fi
 # Handle password authentication (either chosen or fallback)
 if [ "$auth_method" = "password" ]; then
     # Loop until SSH credentials are verified; SSH will prompt for password interactively
+    # Pass new_port and original_port if port change is needed
+    verify_new_port=""
+    if [ "$original_port" = "22" ] && [ "$port" != "22" ] && [[ "$change_port_choice" =~ ^[Yy]$ ]]; then
+        verify_new_port="$port"
+    fi
+    
     while true; do
         username=$(prompt_with_default "Enter the SSH username" "$username")
         echo "Enter the SSH password for remote host"
-        if verify_ssh "$host" "$port" "$username"; then
+        if verify_ssh "$host" "$original_port" "$username" "$verify_new_port" "$original_port"; then
             echo -e "${GREEN}SSH credentials verified successfully.${NC}"
+            # Port change is handled inside verify_ssh function
+            # Update port based on whether change was successful
+            if [ -n "$verify_new_port" ] && [ "$port_change_success" = "1" ]; then
+                port="$verify_new_port"
+            elif [ -n "$verify_new_port" ]; then
+                # Port change was attempted but failed, use original port
+                port="$original_port"
+            fi
             break
         else
             echo -e "${RED}SSH connection check failed${NC}"
@@ -712,7 +1014,17 @@ fi
     echo "  port: $port"
 } >> "$roster_file"
 
-# Add host to known_hosts
+# Add host to known_hosts with final port
 add_to_known_hosts "$host" "$port"
 
 echo -e "${GREEN}Host ${BOLD}$name${NC}${GREEN} with address ${BOLD}$host${NC}${GREEN} has been added to the roster file: $roster_file${NC}"
+
+# Test connection with salt-ssh if available
+if command -v salt-ssh >/dev/null 2>&1; then
+    echo ""
+    if salt-ssh "$name" test.ping 2>/dev/null | grep -q "True"; then
+        echo -e "${GREEN}Salt-SSH test.ping successful for $name${NC}"
+    else
+        echo -e "${RED}Salt-SSH test.ping failed or salt-ssh not properly configured${NC}"
+    fi
+fi
