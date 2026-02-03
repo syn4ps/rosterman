@@ -13,3 +13,6 @@
 *.key
 id_rsa*
 
+
+# Development/test files
+rosterman-dev.sh
