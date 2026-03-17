@@ -103,6 +103,23 @@ check_name_exists() {
     grep -qE "^${name}:" "$file"
 }
 
+# Function to validate roster host names
+validate_host_name() {
+    local name="$1"
+
+    if [ -z "$name" ]; then
+        echo -e "${RED}Error: Name is required.${NC}"
+        return 1
+    fi
+
+    if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "${RED}Error: Invalid name for host '$name'. Only letters, numbers, '-' and '_' are allowed.${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
 # Function to verify SSH by allowing interactive password entry (no sshpass/expect)
 # Sets global variable port_change_success=1 if port change succeeded, 0 if failed or not attempted
 verify_ssh() {
@@ -565,6 +582,76 @@ list_hosts() {
     ' "$roster_file"
 }
 
+# Function to extract host information from roster file
+get_host_info() {
+    local name="$1"
+    local roster_file="$2"
+
+    awk -v name="$name" '
+    $0 ~ "^" name ":" {
+        found = 1
+        next
+    }
+    found && /^  host:/ { host = $2 }
+    found && /^  user:/ { user = $2 }
+    found && /^  port:/ { port = $2 }
+    found && /^  priv:/ { priv = $2 }
+    found && /^[a-zA-Z0-9_-]+:/ {
+        found = 0
+    }
+    END {
+        if (port == "") port = "22"
+        print host "|" user "|" port "|" priv
+    }
+    ' "$roster_file"
+}
+
+# Function to connect to host from roster file
+enter_host() {
+    local name="$1"
+    local roster_file="$2"
+
+    if ! validate_host_name "$name"; then
+        exit 1
+    fi
+
+    if [ ! -f "$roster_file" ]; then
+        echo -e "${RED}Error: Roster file not found: $roster_file${NC}"
+        exit 1
+    fi
+
+    if ! grep -qE "^${name}:" "$roster_file"; then
+        echo -e "${RED}Error: Host '$name' not found in roster file${NC}"
+        exit 1
+    fi
+
+    local host_info
+    host_info=$(get_host_info "$name" "$roster_file")
+
+    local host=$(echo "$host_info" | cut -d'|' -f1)
+    local user=$(echo "$host_info" | cut -d'|' -f2)
+    local port=$(echo "$host_info" | cut -d'|' -f3)
+    local priv=$(echo "$host_info" | cut -d'|' -f4)
+
+    if [ -z "$host" ] || [ -z "$user" ]; then
+        echo -e "${RED}Error: Incomplete roster entry for host '$name'${NC}"
+        exit 1
+    fi
+
+    if [ -z "$priv" ]; then
+        echo -e "${RED}Error: Host '$name' does not have a private key path in roster file${NC}"
+        exit 1
+    fi
+
+    if [ ! -f "$priv" ]; then
+        echo -e "${RED}Error: Private key file not found: $priv${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Connecting to ${BOLD}${user}@${host}:${port}${NC}"
+    exec ssh -i "$priv" -p "$port" "$user@$host"
+}
+
 # Function to remove host from roster
 remove_host() {
     local name="$1"
@@ -587,24 +674,8 @@ remove_host() {
         exit 1
     fi
     
-    # Extract host information using awk
-    local host_info=$(awk -v name="$name" '
-    $0 ~ "^" name ":" {
-        found = 1
-        next
-    }
-    found && /^  host:/ { host = $2 }
-    found && /^  user:/ { user = $2 }
-    found && /^  port:/ { port = $2 }
-    found && /^  priv:/ { priv = $2 }
-    found && /^[a-zA-Z0-9_-]+:/ { 
-        found = 0
-    }
-    END {
-        if (port == "") port = "22"
-        print host "|" user "|" port "|" priv
-    }
-    ' "$roster_file")
+    # Extract host information from roster
+    local host_info=$(get_host_info "$name" "$roster_file")
     
     local host=$(echo "$host_info" | cut -d'|' -f1)
     local user=$(echo "$host_info" | cut -d'|' -f2)
@@ -714,6 +785,10 @@ add_host_noninteractive() {
     local userhost="$2"
     local description="$3"
     local roster_file="$4"
+
+    if ! validate_host_name "$name"; then
+        exit 1
+    fi
     
     # Parse username@host:port
     if [[ ! "$userhost" =~ ^([^@]+)@([^:]+):([0-9]+)$ ]]; then
@@ -806,6 +881,7 @@ show_help() {
     echo "Usage:"
     echo "  $0                                      - Add new host (interactive mode)"
     echo "  $0 add <name> <user@host:port> [desc]  - Add new host (non-interactive)"
+    echo "  $0 enter <name> [roster_file]          - Connect to host over SSH using roster key"
     echo "  $0 ls [roster_file]                     - List all hosts from roster"
     echo "  $0 rm <name> [roster_file]              - Remove host from roster"
     echo "  $0 help                                 - Show this help message"
@@ -826,6 +902,15 @@ elif [ "$1" = "add" ]; then
     fi
     roster_file="$default_roster_file"
     add_host_noninteractive "$2" "$3" "$4" "$roster_file"
+    exit 0
+elif [ "$1" = "enter" ]; then
+    if [ -z "$2" ]; then
+        echo -e "${RED}Error: Host name is required${NC}"
+        echo "Usage: $0 enter <name> [roster_file]"
+        exit 1
+    fi
+    roster_file="${3:-$default_roster_file}"
+    enter_host "$2" "$roster_file"
     exit 0
 elif [ "$1" = "ls" ]; then
     roster_file="${2:-$default_roster_file}"
@@ -869,8 +954,8 @@ echo "Adding a new host to the roster..."
 # Loop until a unique name is provided
 while true; do
     name=$(prompt_with_default "Enter the unique name for the host" "")
-    if [ -z "$name" ]; then
-        echo -e "${RED}Error: Name is required. Please try again.${NC}"
+    if ! validate_host_name "$name"; then
+        echo "Please try again."
         continue
     fi
     if check_name_exists "$name" "$roster_file"; then
